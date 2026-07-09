@@ -78,7 +78,7 @@ html,body{height:100%;background:var(--bg);font-family:var(--font);color:var(--t
 }
 .topbar-row{display:flex;align-items:center;justify-content:space-between}
 .topbar-title{font-family:var(--font-mono);font-size:13px;font-weight:600;letter-spacing:.02em}
-.topbar-back{font-size:18px;color:var(--text2);cursor:pointer;padding-right:8px}
+.topbar-back{font-size:22px;font-weight:700;color:var(--accent);cursor:pointer;padding:6px 10px 6px 2px;line-height:1;display:flex;align-items:center}
 .topbar-pct{
   font-family:var(--font-mono);font-size:10px;color:var(--accent);
   background:rgba(59,130,246,.12);padding:3px 8px;border-radius:20px;
@@ -322,7 +322,7 @@ html,body{height:100%;background:var(--bg);font-family:var(--font);color:var(--t
   <div class="topbar">
     <div class="topbar-row">
       <div style="display:flex;align-items:center;gap:2px">
-        
+        <span class="topbar-back" onclick="goBack()" title="Importar otro troncal / cambiar de obra">&#8592;</span>
         <div>
           <div class="topbar-title" id="appTitle">FTTH</div>
           <div class="topbar-sub" id="appSub"></div>
@@ -671,7 +671,24 @@ function processFile(file){
       setProgress(70,'Verificando datos...');
       if(!parsed.naps || parsed.naps.length===0) throw new Error('No se encontraron NAPs. Verificá que sea un ADDRO 7.x válido.');
       setProgress(90,'Construyendo red...');
-      DATA = parsed;
+
+      // Si ya hay una obra cargada con el mismo SITIO, preguntar si sumar troncales
+      if(DATA && DATA.info && DATA.info.sitio && parsed.info.sitio === DATA.info.sitio){
+        const yaEstan = new Set(DATA.naps.map(n=>n.id));
+        const nuevos = parsed.naps.filter(n=>!yaEstan.has(n.id)).length;
+        const repetidos = parsed.naps.length - nuevos;
+        let msg = `Ya tenés cargada la obra ${DATA.info.sitio}-${DATA.info.pd||''} con ${DATA.naps.length} NAPs.\n\nEste archivo trae ${parsed.naps.length} NAPs (${nuevos} nuevas`;
+        msg += repetidos>0 ? `, ${repetidos} ya existentes que se actualizarán).` : ').';
+        msg += '\n\n¿Sumar este troncal a la obra existente?\n(Cancelar = reemplazar todo por este archivo)';
+        if(confirm(msg)){
+          DATA = mergeAddroData(DATA, parsed);
+        } else {
+          DATA = parsed;
+        }
+      } else {
+        DATA = parsed;
+      }
+
       saveRecent(DATA.info, DATA.naps, DATA.bom);
       loadState();
       setProgress(100,'✓ '+DATA.naps.length+' NAPs · '+Object.keys(DATA.trkMap||{}).length+' troncales');
@@ -686,6 +703,50 @@ function processFile(file){
   reader.readAsArrayBuffer(file);
 }
 
+// ══ FUSIÓN DE TRONCALES (misma obra, distintos ADDRO) ═══════════════
+function mergeAddroData(base, incoming){
+  // info: combinar campos simples y listas (pcs, troncales_disponibles)
+  const info = Object.assign({}, base.info, incoming.info);
+
+  const pcMap = {};
+  (base.info.pcs||[]).forEach(p=>pcMap[p.id]=p);
+  (incoming.info.pcs||[]).forEach(p=>pcMap[p.id]=p);
+  info.pcs = Object.values(pcMap);
+
+  // NAPs: unión por id (el archivo nuevo pisa si el id se repite)
+  const napMap = {};
+  (base.naps||[]).forEach(n=>napMap[n.id]=n);
+  (incoming.naps||[]).forEach(n=>napMap[n.id]=n);
+  const naps = Object.values(napMap);
+  info.hhpp = naps.reduce((s,n)=>s+(n.hhpp||0),0);
+
+  // Troncales: unión de letras disponibles, sacar de "pendiente" la que ya llegó
+  const setA = new Set(base.info.troncales_disponibles||[]);
+  const setB = new Set(incoming.info.troncales_disponibles||[]);
+  const troncosSet = new Set([...setA, ...setB]);
+  info.troncales_disponibles = Array.from(troncosSet).sort();
+  if(info.troncal_pendiente && troncosSet.has(info.troncal_pendiente)){
+    delete info.troncal_pendiente;
+  }
+
+  // trkMap: unión (el nuevo pisa si hay conflicto de id)
+  const trkMap = Object.assign({}, base.trkMap||{}, incoming.trkMap||{});
+
+  // BOM: sumar cantidades proyectadas por código SAP
+  const bomMap = {};
+  (base.bom||[]).forEach(b=>bomMap[b.codigo]=Object.assign({},b));
+  (incoming.bom||[]).forEach(b=>{
+    if(bomMap[b.codigo]){
+      bomMap[b.codigo].proyectado = (bomMap[b.codigo].proyectado||0) + (b.proyectado||0);
+    } else {
+      bomMap[b.codigo] = Object.assign({},b);
+    }
+  });
+  const bom = Object.values(bomMap);
+
+  return {info, naps, bom, trkMap};
+}
+
 // ══ ADDRO PARSER ════════════════════════════════════════════════
 // Estructura real del AdDRO 7.x
 // TRONCAL: col[1]=etiqueta, col[2]=valor, col[6]=FO, col[7]=nombre PC (rows 14-17)
@@ -693,6 +754,7 @@ function processFile(file){
 //        fila de NAP    → col[11]='NAP', col[10]=napId, col[3]=metros, col[13]=FO
 //        fila de CDO    → col[6]=cdoId (empieza con napId)
 // BOM: header en la fila donde col[1]='CODIGO SAP', datos desde la siguiente
+
 
 function parseADDRO(wb){
   const info  = parseTRONCAL(wb);
